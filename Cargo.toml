@@ -1,31 +1,20 @@
 [package]
 name = "fibonacci_heap"
-version = "0.8.1"
-edition = "2021"
+version = "1.0.0"
+edition = "2024"
 authors = ["Your Name <your.email@example.com>"]
-description = "A high-performance Fibonacci Heap implementation in Rust"
+description = "A high-performance Fibonacci Heap implementation"
 license = "MIT"
-repository = "https://github.com/xvi-xv-xii-ix-xxii-ix-xiv/fibonacci_heap"
-documentation = "https://docs.rs/fibonacci_heap"
-homepage = "https://github.com/xvi-xv-xii-ix-xxii-ix-xiv/fibonacci_heap"
+repository = "https://github.com/skull-squadron/fibonacci-heap-rs"
 categories = ["data-structures", "algorithms"]
 keywords = ["heap", "priority-queue", "fibonacci-heap", "rust"]
-readme = "README.md"
-exclude = ["/target", "/.git", "/*.iml", "/*.lock"]
-
-[dependencies]
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.7"
 
 [features]
 default = ["concurrent"]
 concurrent = []
-
-[lib]
-name = "fibonacci_heap"
-path = "src/lib.rs"
-crate-type = ["lib"]
 
 [profile.release]
 opt-level = 3
@@ -41,3 +30,6 @@ opt-level = 3
 name = "fibonacci_heap_benchmark"
 path = "benches/fibonacci_heap_benchmark.rs"
 harness = false
+
+[dependencies]
+paste = "1"
