@@ -1,10 +1,11 @@
 [![Crates.io](https://img.shields.io/crates/v/fibonacci_heap.svg)](https://crates.io/crates/fibonacci_heap)
-![Rust](https://img.shields.io/badge/Rust-1.70+-orange)
+![Rust](https://img.shields.io/badge/Rust-1.80+-orange)
 ![License](https://img.shields.io/badge/License-MIT-blue)
+![Edition](https://img.shields.io/badge/Edition-2024-purple)
 
 # Fibonacci Heap in Rust
 
-A high-performance **Fibonacci Heap** implementation in Rust. The **Fibonacci Heap** is a heap data structure consisting of a collection of trees, which is used to implement priority queues. It offers improved amortized time complexities for many operations compared to other heap structures, such as binary heaps. Its primary advantages are its efficient **decrease-key** and **merge** operations, making it particularly useful in algorithms like Dijkstra's and Prim's for shortest paths and minimum spanning trees.
+A high-performance **Fibonacci Heap** implementation in Rust with **generic type support**. The **Fibonacci Heap** is a heap data structure consisting of a collection of trees, which is used to implement priority queues. It offers improved amortized time complexities for many operations compared to other heap structures, such as binary heaps. Its primary advantages are its efficient **decrease-key** and **merge** operations, making it particularly useful in algorithms like Dijkstra's and Prim's for shortest paths and minimum spanning trees.
 
 ## Features
 
@@ -20,30 +21,38 @@ A high-performance **Fibonacci Heap** implementation in Rust. The **Fibonacci He
 - **Insert:** Add a new element to the heap.
 - **Extract Min:** Remove the element with the smallest value.
 - **Decrease Key:** Modify the value of an element, reducing it.
+- **Merge:** Merge two heaps efficiently.
+- **Peek Min:** View the minimum element without removing it.
 
-### Internal Operations
+### Supported Types
 
-- **Link:** The `link` operation is used to link two trees in the heap when the root of one tree becomes smaller than the root of another tree. It connects the smaller tree as a child of the larger tree. This operation helps maintain the heap property and is a key part of the Fibonacci heap structure, contributing to the efficient decrease-key and merge operations.
+The library now supports multiple data types:
+- **Integer types:** `i8`, `i16`, `i32`, `i64`, `i128`, `isize`
+- **Unsigned types:** `u8`, `u16`, `u32`, `u64`, `u128`, `usize`
+- **Float types:** `f32`, `f64`
+- **Character type:** `char`
 
-- **Cut:** The `cut` operation removes a node from its parent in the heap, and places it as a new root. This operation is used when the decrease-key operation causes a node's value to become smaller than its parent's value, violating the heap property. Cutting the node ensures the heap structure remains valid and allows for efficient future operations.
+Type aliases are provided for convenience:
+- `FibonacciHeapI32`, `FibonacciHeapF64`, `FibonacciHeapChar`, etc.
 
-- **Cascading Cut:** The `cascading_cut` operation is a recursive process that cuts a node and propagates the cut up the tree. If a node's parent has already lost a child (i.e., been cut before), the node itself is recursively cut and moved to the root list. This process helps maintain a balanced structure in the Fibonacci heap, ensuring that each node's degree is not too large, which contributes to the heap's efficient performance.
+For backward compatibility, `FibonacciHeap` is a type alias for `GenericFibonacciHeap<i32>`.
 
-## Implementation Details
+### Improved Architecture
 
-- The heap is represented as a collection of trees.
-- Each tree is a root of a doubly linked list, where nodes are linked to their parent and siblings.
-- The decrease-key operation is efficient due to the lazy structure of the heap.
+- **Generic implementation:** Single implementation for all supported types
+- **NodeRef trait:** Abstraction layer over node references
+- **Enhanced validation:** Thread-safe node validation
+- **Better error handling:** Comprehensive `HeapError` enum with detailed error types
 
 ## Example Usage
 
-Here's an example of how to use the Fibonacci Heap in your project:
+### Basic Usage with Generic Type
 
 ```rust
-use fibonacci_heap::FibonacciHeap;
+use fibonacci_heap::GenericFibonacciHeap;
 
 fn main() {
-    let mut heap = FibonacciHeap::new();
+    let mut heap: GenericFibonacciHeap<i32> = GenericFibonacciHeap::new();
 
     // Insert elements
     let node1 = heap.insert(10).unwrap();
@@ -54,32 +63,7 @@ fn main() {
     println!("Extracted min: {:?}", min);  // Output: Some(10)
 
     // Decrease key
-    heap.decrease_key(&node2, 5).unwrap();
+    heap.decrease_key(&node1, 5).unwrap();
     let min_after_decrease = heap.extract_min();
     println!("Extracted min after decrease key: {:?}", min_after_decrease);  // Output: Some(5)
 }
-
-## Example Tests
-- test_insert: Inserts a single element and checks if the heap's minimum is correct.
-- test_extract_min: Inserts elements and ensures the correct minimum is extracted.
-- test_merge: Merges two Fibonacci heaps and checks the minimum after the merge.
-- test_decrease_key: Tests the decrease key operation.
-- test_multiple_extracts: Extracts multiple elements and checks the order.
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-# Contributing
-
-Contributions are welcome! Please fork this repository, make your changes, and submit a pull request. Ensure that all tests pass before submitting.
-
-# Contact
-
-If you have any questions or suggestions, feel free to open an issue or reach out to the author:
-
-Author: xvi-xv-xii-ix-xxii-ix-xiv
-GitHub Repository: https://github.com/xvi-xv-xii-ix-xxii-ix-xiv/fibonacci_heap
-Documentation: https://docs.rs/fibonacci_heap
-```
-
