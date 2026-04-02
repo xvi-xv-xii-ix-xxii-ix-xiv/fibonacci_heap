@@ -1,0 +1,51 @@
+# Cargo.toml
+[package]
+name = "fibonacci_heap"
+version = "0.9.2"
+edition = "2024"
+authors = ["<xvi-xv-xii-ix-xxii-ix-xiv <xvi.xv.xii.ix.xxii.ix.xiv@gmail.com>"]
+description = "A high-performance Fibonacci Heap implementation in Rust with generic type support"
+license = "MIT"
+repository = "https://github.com/xvi-xv-xii-ix-xxii-ix-xiv/fibonacci_heap"
+documentation = "https://docs.rs/fibonacci_heap"
+homepage = "https://github.com/xvi-xv-xii-ix-xxii-ix-xiv/fibonacci_heap"
+categories = ["data-structures", "algorithms"]
+keywords = ["heap", "priority-queue", "fibonacci-heap", "rust", "generic"]
+readme = "README.md"
+exclude = ["/target", "/.git", "/*.iml", "/*.lock"]
+
+[dependencies]
+
+[dev-dependencies]
+criterion = "0.8.1"
+rand = "0.10.0"
+
+[features]
+default = ["concurrent"]
+concurrent = []
+
+[lib]
+name = "fibonacci_heap"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[[bench]]
+name = "fibonacci_heap_benchmark"
+path = "benches/fibonacci_heap_benchmark.rs"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+incremental = false
+debug = true
+
+[profile.bench]
+opt-level = 3
+debug = true
+
+[profile.dev]
+opt-level = 1
+debug = true
