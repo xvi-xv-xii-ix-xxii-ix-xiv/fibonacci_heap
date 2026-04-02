@@ -11,7 +11,7 @@
 //! - O(log n) amortized time for extract minimum operations
 //! - Support for multiple data types (i32, f64, char, etc.)
 //! - Comprehensive error handling
-//! - Thread-safe node validation
+//! - Node validity tracking via `valid` flag
 //!
 //! # Example
 //! ```
@@ -33,10 +33,8 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering as CmpOrdering;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::rc::{Rc, Weak};
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 /// Error types for Fibonacci Heap operations
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,35 +53,48 @@ pub type HeapResult<T> = Result<T, HeapError>;
 pub trait HeapKey: PartialOrd + Clone + Debug + 'static {}
 impl<T> HeapKey for T where T: PartialOrd + Clone + Debug + 'static {}
 
-/// A node in the Fibonacci Heap
+/// A node in the Fibonacci Heap.
+///
+/// The `key` field is private to enforce heap-property invariants;
+/// use [`Node::key`] to read it and [`GenericFibonacciHeap::decrease_key`] to mutate it.
 #[derive(Debug)]
 pub struct Node<T: HeapKey> {
-    pub key: T,
+    key: T,
     degree: usize,
     marked: bool,
+    /// Set to `false` when the node is extracted or the heap is cleared,
+    /// so that stale [`Rc`] handles returned from [`GenericFibonacciHeap::insert`]
+    /// are correctly rejected by [`GenericFibonacciHeap::validate_node`].
+    valid: bool,
     parent: Option<Weak<RefCell<Node<T>>>>,
     children: Vec<Rc<RefCell<Node<T>>>>,
-    id: usize,
 }
 
 impl<T: HeapKey> Node<T> {
-    /// Creates a new node with the given key and unique ID
-    fn new(key: T, id: usize) -> Rc<RefCell<Self>> {
+    fn new(key: T) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Node {
             key,
             degree: 0,
             marked: false,
+            valid: true,
             parent: None,
             children: Vec::new(),
-            id,
         }))
+    }
+
+    /// Returns a reference to this node's key.
+    pub fn key(&self) -> &T {
+        &self.key
     }
 }
 
-/// Trait for node reference abstraction
+/// Trait for node reference abstraction.
 pub trait NodeRef<T: HeapKey> {
+    /// Returns `true` if the node is still present in `heap`.
     fn validate(&self, heap: &GenericFibonacciHeap<T>) -> bool;
+    /// Clones and returns the node's current key.
     fn get_key(&self) -> T;
+    /// Returns a stable unique identifier for this node (its allocation address).
     fn get_id(&self) -> usize;
 }
 
@@ -96,8 +107,10 @@ impl<T: HeapKey> NodeRef<T> for Rc<RefCell<Node<T>>> {
         self.borrow().key.clone()
     }
 
+    /// Returns the raw pointer of the underlying `RefCell<Node<T>>` cast to `usize`.
+    /// This uniquely identifies the node for the lifetime of the `Rc`.
     fn get_id(&self) -> usize {
-        self.borrow().id
+        self.as_ptr() as usize
     }
 }
 
@@ -107,8 +120,6 @@ pub struct GenericFibonacciHeap<T: HeapKey> {
     min: Option<Rc<RefCell<Node<T>>>>,
     root_list: Vec<Rc<RefCell<Node<T>>>>,
     node_count: usize,
-    next_id: AtomicUsize,
-    active_nodes: HashMap<usize, Weak<RefCell<Node<T>>>>,
 }
 
 /// Default implementation for GenericFibonacciHeap
@@ -125,29 +136,20 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
             min: None,
             root_list: Vec::new(),
             node_count: 0,
-            next_id: AtomicUsize::new(0),
-            active_nodes: HashMap::new(),
         }
     }
 
-    /// Validates if a node exists in the heap
+    /// Returns `true` if `node` is currently present in the heap.
+    ///
+    /// Validity is tracked via a `valid` flag set to `false` on extraction
+    /// or on [`clear`][Self::clear], so this is an O(1) check.
     pub fn validate_node(&self, node: &Rc<RefCell<Node<T>>>) -> bool {
-        let node_id = node.borrow().id;
-        if let Some(weak_ref) = self.active_nodes.get(&node_id)
-            && let Some(strong_ref) = weak_ref.upgrade()
-        {
-            return Rc::ptr_eq(&strong_ref, node);
-        }
-        false
+        node.borrow().valid
     }
 
     /// Inserts a new key into the heap and returns a reference to the created node
     pub fn insert(&mut self, key: T) -> HeapResult<Rc<RefCell<Node<T>>>> {
-        let id = self.next_id.fetch_add(1, AtomicOrdering::SeqCst);
-        let node = Node::new(key, id);
-
-        // Store weak reference for validation
-        self.active_nodes.insert(id, Rc::downgrade(&node));
+        let node = Node::new(key);
 
         self.root_list.push(Rc::clone(&node));
         self.node_count += 1;
@@ -164,14 +166,15 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
         Ok(node)
     }
 
-    /// Merges another Fibonacci Heap into this one
+    /// Merges another Fibonacci Heap into this one.
+    ///
+    /// The two heaps may have been created independently; their node ID spaces
+    /// do not conflict because validity is tracked per-node via a `valid` flag
+    /// rather than a shared ID counter.
     pub fn merge(&mut self, other: GenericFibonacciHeap<T>) {
         // Merge root lists
         self.root_list.extend(other.root_list);
         self.node_count += other.node_count;
-
-        // Merge active nodes
-        self.active_nodes.extend(other.active_nodes);
 
         // Update minimum if needed
         if let Some(other_min) = other.min {
@@ -188,21 +191,23 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
     /// Extracts the minimum value from the heap
     pub fn extract_min(&mut self) -> Option<T> {
         let min_node = self.min.take()?;
+
+        // Invalidate the node so stale Rc handles are correctly rejected
+        min_node.borrow_mut().valid = false;
         let min_key = min_node.borrow().key.clone();
-        let min_id = min_node.borrow().id;
 
-        // Remove from active nodes
-        self.active_nodes.remove(&min_id);
-
-        // Add children to root list
+        // Add children to root list, clearing their parent pointers
         let children = std::mem::take(&mut min_node.borrow_mut().children);
         for child in children {
             child.borrow_mut().parent = None;
             self.root_list.push(child);
         }
 
-        // Remove min node from root list
-        self.root_list.retain(|node| !Rc::ptr_eq(node, &min_node));
+        // Remove min node from root list.
+        // swap_remove is O(1) vs retain's O(n) element-shifting.
+        if let Some(pos) = self.root_list.iter().position(|n| Rc::ptr_eq(n, &min_node)) {
+            self.root_list.swap_remove(pos);
+        }
         self.node_count -= 1;
 
         if self.root_list.is_empty() {
@@ -216,7 +221,15 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
 
     /// Consolidates the trees in the heap to maintain the Fibonacci Heap properties
     fn consolidate(&mut self) {
-        let max_degree = (self.node_count as f64).log2() as usize + 2;
+        // Upper bound on max degree: D(n) ≤ ⌊log_φ(n)⌋ + 1, where log_φ(n) ≈ 1.44·log₂(n).
+        // We use ⌊log₂(n)⌋ + ⌊log₂(n)⌋/2 + 2  ≈ 1.5·log₂(n) + 2, a safe over-estimate
+        // that avoids mid-loop resize in virtually all cases.
+        let max_degree = if self.node_count <= 1 {
+            2
+        } else {
+            let log2n = self.node_count.ilog2() as usize;
+            log2n + log2n / 2 + 2
+        };
         let mut degree_table: Vec<Option<Rc<RefCell<Node<T>>>>> = vec![None; max_degree];
 
         let roots = std::mem::take(&mut self.root_list);
@@ -231,9 +244,11 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
 
             while let Some(existing) = degree_table[degree].take() {
                 if current.borrow().key < existing.borrow().key {
-                    self.link(&existing, &current);
+                    // existing becomes child of current
+                    Self::link_trees(&existing, &current);
                 } else {
-                    self.link(&current, &existing);
+                    // current becomes child of existing
+                    Self::link_trees(&current, &existing);
                     current = existing;
                 }
                 degree = current.borrow().degree;
@@ -247,10 +262,13 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
         }
 
         self.root_list = degree_table.into_iter().flatten().collect();
-        // Recompute min from the final root list. Tracking new_min incrementally
+
+        // Recompute min from the consolidated root list. Tracking new_min incrementally
         // is incorrect: a node recorded as new_min can be subsequently linked as
         // a child of another tree, leaving self.min pointing to a non-root node.
-        self.min = self.root_list.iter()
+        self.min = self
+            .root_list
+            .iter()
             .reduce(|acc, node| {
                 match node.borrow().key.partial_cmp(&acc.borrow().key) {
                     Some(CmpOrdering::Less) => node,
@@ -260,16 +278,14 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
             .cloned();
     }
 
-    /// Links two trees by making one a child of the other
-    fn link(&mut self, child: &Rc<RefCell<Node<T>>>, parent: &Rc<RefCell<Node<T>>>) {
-        // Remove child from root list
-        self.root_list.retain(|node| !Rc::ptr_eq(node, child));
-
-        // Update child's parent
+    /// Links two trees by making `child` a subtree of `parent`.
+    ///
+    /// This is a static method used exclusively during consolidation, where the
+    /// root list has already been taken via `mem::take`. It does **not** touch
+    /// `self.root_list`, avoiding a pointless `retain` over an empty `Vec`.
+    fn link_trees(child: &Rc<RefCell<Node<T>>>, parent: &Rc<RefCell<Node<T>>>) {
         child.borrow_mut().parent = Some(Rc::downgrade(parent));
         child.borrow_mut().marked = false;
-
-        // Add child to parent's children
         parent.borrow_mut().children.push(Rc::clone(child));
         parent.borrow_mut().degree += 1;
     }
@@ -281,34 +297,35 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
             return Err(HeapError::NodeNotFound);
         }
 
-        // Validate key comparison
         let old_key = node.borrow().key.clone();
 
         // Handle NaN for floats - NaN is never less than any value
         match old_key.partial_cmp(&new_key) {
             Some(CmpOrdering::Less) | Some(CmpOrdering::Equal) => {
-                // New key is greater or equal, which is not allowed for decrease_key
                 return Err(HeapError::InvalidKey);
             }
-            Some(CmpOrdering::Greater) => {
-                // Key is decreasing, which is allowed
-            }
+            Some(CmpOrdering::Greater) => {}
             None => {
-                // Comparison failed (NaN involved)
                 return Err(HeapError::KeyComparisonError);
             }
         }
 
-        // Update key
         node.borrow_mut().key = new_key.clone();
 
-        // Check if heap property is violated
-        if let Some(parent_weak) = &node.borrow().parent
-            && let Some(parent) = parent_weak.upgrade()
-            && new_key < parent.borrow().key
-        {
-            self.cut(node, &parent);
-            self.cascading_cut(&parent);
+        // Extract the parent Rc *before* entering the body.
+        //
+        // SAFETY: if we instead wrote `if let Some(pw) = &node.borrow().parent && ...`,
+        // the temporary `Ref<Node<T>>` from `node.borrow()` would be kept alive through
+        // the entire `if` body by Rust's temporary-lifetime extension rules.  Inside that
+        // body, `cut()` calls `node.borrow_mut()`, which would panic at runtime because
+        // an immutable borrow is still live.  Resolving the parent into an owned `Rc`
+        // here releases the `Ref` before any mutable access occurs.
+        let parent_opt = node.borrow().parent.as_ref().and_then(|pw| pw.upgrade());
+        if let Some(parent) = parent_opt {
+            if new_key < parent.borrow().key {
+                self.cut(node, &parent);
+                self.cascading_cut(&parent);
+            }
         }
 
         // Update minimum if needed
@@ -325,14 +342,12 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
 
     /// Cuts a node from its parent and moves it to the root list
     fn cut(&mut self, node: &Rc<RefCell<Node<T>>>, parent: &Rc<RefCell<Node<T>>>) {
-        // Remove node from parent's children
         parent
             .borrow_mut()
             .children
             .retain(|child| !Rc::ptr_eq(child, node));
         parent.borrow_mut().degree -= 1;
 
-        // Add node to root list
         node.borrow_mut().parent = None;
         node.borrow_mut().marked = false;
         self.root_list.push(Rc::clone(node));
@@ -340,9 +355,11 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
 
     /// Performs cascading cuts on a node's ancestors if needed
     fn cascading_cut(&mut self, node: &Rc<RefCell<Node<T>>>) {
-        if let Some(parent_weak) = &node.borrow().parent
-            && let Some(parent) = parent_weak.upgrade()
-        {
+        // Extract the parent Rc before entering the body for the same reason as in
+        // decrease_key: holding `node.borrow()` across a call to `cut()` (which calls
+        // `node.borrow_mut()`) would panic at runtime.
+        let parent_opt = node.borrow().parent.as_ref().and_then(|pw| pw.upgrade());
+        if let Some(parent) = parent_opt {
             if !node.borrow().marked {
                 node.borrow_mut().marked = true;
             } else {
@@ -359,7 +376,7 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
 
     /// Checks if the heap is empty
     pub fn is_empty(&self) -> bool {
-        self.root_list.is_empty()
+        self.node_count == 0
     }
 
     /// Returns the number of nodes in the heap
@@ -367,13 +384,30 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
         self.node_count
     }
 
-    /// Clears the heap, removing all values
+    /// Clears the heap, removing all values.
+    ///
+    /// All node handles previously returned by [`insert`][Self::insert] are
+    /// invalidated: [`validate_node`][Self::validate_node] will return `false`
+    /// for them after this call.
     pub fn clear(&mut self) {
+        // Walk every tree and mark each node as invalid so that caller-held
+        // Rc<Node> handles are correctly rejected by validate_node.
+        for root in &self.root_list {
+            Self::invalidate_tree(root);
+        }
         self.min = None;
         self.root_list.clear();
         self.node_count = 0;
-        self.active_nodes.clear();
-        self.next_id.store(0, AtomicOrdering::SeqCst);
+    }
+
+    /// Recursively marks all nodes in a tree as invalid.
+    fn invalidate_tree(node: &Rc<RefCell<Node<T>>>) {
+        // Collect children first to avoid holding a borrow while recursing.
+        let children: Vec<_> = node.borrow().children.iter().cloned().collect();
+        node.borrow_mut().valid = false;
+        for child in children {
+            Self::invalidate_tree(&child);
+        }
     }
 }
 
@@ -468,6 +502,31 @@ mod tests {
         assert_eq!(heap.extract_min(), Some(5));
     }
 
+    /// Verifies that decrease_key correctly cuts a node from its parent
+    /// (the path that previously risked a runtime borrow panic).
+    #[test]
+    fn test_decrease_key_with_parent_cut() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+
+        // Insert enough nodes so that after an extract_min the remaining nodes
+        // get consolidated: some will have a parent inside a tree.
+        for i in 1..=8 {
+            heap.insert(i * 10).unwrap();
+        }
+        // extract_min triggers consolidate(); afterwards several nodes have parents.
+        assert_eq!(heap.extract_min(), Some(10));
+
+        // Now decrease a key that is deep inside a tree to force a cut + cascading_cut.
+        // We re-insert the nodes we care about to get handles.
+        let mut heap2 = GenericFibonacciHeap::<i32>::new();
+        let nodes: Vec<_> = (1..=8).map(|i| heap2.insert(i * 10).unwrap()).collect();
+        heap2.extract_min(); // consolidate
+
+        // Decrease a high-value node below its parent to force a cut
+        heap2.decrease_key(&nodes[7], 5).unwrap(); // was 80 → now 5
+        assert_eq!(heap2.extract_min(), Some(5));
+    }
+
     #[test]
     fn test_decrease_key_validation() {
         let mut heap = GenericFibonacciHeap::new();
@@ -490,6 +549,70 @@ mod tests {
             heap.decrease_key(&node, f64::NAN),
             Err(HeapError::KeyComparisonError)
         );
+    }
+
+    #[test]
+    fn test_clear_invalidates_nodes() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(42).unwrap();
+        assert!(heap.validate_node(&node));
+
+        heap.clear();
+
+        // After clear, the node handle must be invalid
+        assert!(!heap.validate_node(&node));
+        assert_eq!(heap.len(), 0);
+        assert!(heap.is_empty());
+    }
+
+    #[test]
+    fn test_merge_no_id_collision() {
+        // Both heaps have independently generated node IDs starting from 0.
+        // After merging, validation must work correctly for nodes from both heaps.
+        let mut heap_a = GenericFibonacciHeap::<i32>::new();
+        let a0 = heap_a.insert(100).unwrap();
+        let a1 = heap_a.insert(200).unwrap();
+
+        let mut heap_b = GenericFibonacciHeap::<i32>::new();
+        let b0 = heap_b.insert(50).unwrap();
+        let b1 = heap_b.insert(150).unwrap();
+
+        heap_a.merge(heap_b);
+
+        // All four nodes must still be valid in the merged heap
+        assert!(heap_a.validate_node(&a0));
+        assert!(heap_a.validate_node(&a1));
+        assert!(heap_a.validate_node(&b0));
+        assert!(heap_a.validate_node(&b1));
+
+        assert_eq!(heap_a.extract_min(), Some(50));
+        // b0 was extracted — now invalid
+        assert!(!heap_a.validate_node(&b0));
+        // others still valid
+        assert!(heap_a.validate_node(&a0));
+        assert!(heap_a.validate_node(&a1));
+        assert!(heap_a.validate_node(&b1));
+    }
+
+    #[test]
+    fn test_extracted_node_is_invalid() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(1).unwrap();
+        heap.insert(2).unwrap();
+
+        assert!(heap.validate_node(&node));
+        heap.extract_min(); // removes key=1
+        assert!(!heap.validate_node(&node));
+
+        // decrease_key on an extracted node must return NodeNotFound
+        assert_eq!(heap.decrease_key(&node, 0), Err(HeapError::NodeNotFound));
+    }
+
+    #[test]
+    fn test_node_key_accessor() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(42).unwrap();
+        assert_eq!(*node.borrow().key(), 42);
     }
 
     #[test]
@@ -527,13 +650,17 @@ mod tests {
         assert_eq!(heap.extract_min(), Some(0)); // 1st
         assert_eq!(heap.extract_min(), Some(0)); // 2nd
         assert_eq!(heap.extract_min(), Some(0)); // 3rd
-        assert_eq!(heap.extract_min(), None);    // 4th — heap is empty
+        assert_eq!(heap.extract_min(), None); // 4th — heap is empty
 
         // Same but exhaust varying counts of equal-key nodes
         for n in 1..=16 {
             let mut h = GenericFibonacciHeap::<i32>::new();
-            for _ in 0..n { h.insert(0).unwrap(); }
-            for i in 0..n { assert_eq!(h.extract_min(), Some(0), "pop {} of {}", i+1, n); }
+            for _ in 0..n {
+                h.insert(0).unwrap();
+            }
+            for i in 0..n {
+                assert_eq!(h.extract_min(), Some(0), "pop {} of {}", i + 1, n);
+            }
             assert_eq!(h.extract_min(), None, "extra pop after {} zeros", n);
             assert_eq!(h.len(), 0, "len after draining {} zeros", n);
         }

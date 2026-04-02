@@ -1,6 +1,6 @@
 // benches/fibonacci_heap_benchmark.rs
 use criterion::{Criterion, criterion_group, criterion_main};
-use fibonacci_heap::{FibonacciHeapI32, GenericFibonacciHeap};
+use fibonacci_heap::{FibonacciHeapI32, GenericFibonacciHeap, NodeRef};
 use std::hint::black_box;
 
 fn bench_insert(c: &mut Criterion) {
@@ -34,7 +34,7 @@ fn bench_decrease_key(c: &mut Criterion) {
             let mut heap = FibonacciHeapI32::new();
             let nodes: Vec<_> = (1..=1000).map(|i| heap.insert(i * 10).unwrap()).collect();
             for node in &nodes {
-                let key = node.borrow().key;
+                let key = node.get_key();
                 heap.decrease_key(node, black_box(key - 5)).unwrap();
             }
         })
@@ -79,7 +79,7 @@ fn bench_decrease_key_f64(c: &mut Criterion) {
                 .map(|i| heap.insert(i as f64 * 10.0).unwrap())
                 .collect();
             for node in &nodes {
-                let key = node.borrow().key;
+                let key = node.get_key();
                 heap.decrease_key(node, black_box(key - 2.5)).unwrap();
             }
         })
