@@ -409,7 +409,112 @@ impl<T: HeapKey> GenericFibonacciHeap<T> {
             Self::invalidate_tree(&child);
         }
     }
+
+    /// Deletes an arbitrary node from the heap.
+    ///
+    /// Implemented as: cut node to root → force it to be `self.min` → `extract_min`.
+    /// This avoids the need for a −∞ sentinel while preserving all heap invariants.
+    ///
+    /// # Errors
+    /// Returns [`HeapError::NodeNotFound`] if `node` is not currently in the heap.
+    ///
+    /// # Complexity
+    /// O(log n) amortized — same as `extract_min`.
+    pub fn delete(&mut self, node: &Rc<RefCell<Node<T>>>) -> HeapResult<()> {
+        if !self.validate_node(node) {
+            return Err(HeapError::NodeNotFound);
+        }
+
+        // If the node has a parent, cut it to the root list first and
+        // perform cascading cuts on its ancestors.
+        let parent_opt = node.borrow().parent.as_ref().and_then(|pw| pw.upgrade());
+        if let Some(parent) = parent_opt {
+            self.cut(node, &parent);
+            self.cascading_cut(&parent);
+        }
+
+        // Force this node to be the minimum so that extract_min removes it.
+        // After extract_min, consolidate re-derives the real minimum from scratch.
+        self.min = Some(Rc::clone(node));
+        self.extract_min();
+
+        Ok(())
+    }
+
+    /// Returns a cloned `Rc` handle to the minimum node without removing it.
+    ///
+    /// Unlike [`peek_min`][Self::peek_min], the returned handle can be passed
+    /// to [`decrease_key`][Self::decrease_key] or [`delete`][Self::delete].
+    pub fn peek_min_node(&self) -> Option<Rc<RefCell<Node<T>>>> {
+        self.min.as_ref().map(Rc::clone)
+    }
+
+    /// Consumes the heap and returns all keys in ascending (sorted) order.
+    ///
+    /// Equivalent to repeatedly calling `extract_min` until empty.
+    /// Complexity: O(n log n).
+    pub fn into_sorted_vec(mut self) -> Vec<T> {
+        let mut result = Vec::with_capacity(self.node_count);
+        while let Some(val) = self.extract_min() {
+            result.push(val);
+        }
+        result
+    }
 }
+
+// ── Iteration ────────────────────────────────────────────────────────────────
+
+/// Consuming iterator that yields keys in ascending order.
+///
+/// Produced by [`GenericFibonacciHeap::into_iter`].
+pub struct IntoIter<T: HeapKey> {
+    heap: GenericFibonacciHeap<T>,
+}
+
+impl<T: HeapKey> Iterator for IntoIter<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.heap.extract_min()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.heap.len();
+        (n, Some(n))
+    }
+}
+
+impl<T: HeapKey> ExactSizeIterator for IntoIter<T> {}
+
+impl<T: HeapKey> IntoIterator for GenericFibonacciHeap<T> {
+    type Item = T;
+    type IntoIter = IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        IntoIter { heap: self }
+    }
+}
+
+impl<T: HeapKey> FromIterator<T> for GenericFibonacciHeap<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut heap = Self::new();
+        for item in iter {
+            // insert only returns Err for NaN-like values; generic T is always valid
+            let _ = heap.insert(item);
+        }
+        heap
+    }
+}
+
+impl<T: HeapKey> Extend<T> for GenericFibonacciHeap<T> {
+    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
+        for item in iter {
+            let _ = self.insert(item);
+        }
+    }
+}
+
+// ── Type aliases ─────────────────────────────────────────────────────────────
 
 /// Type aliases for backward compatibility and convenience
 pub type FibonacciHeap = GenericFibonacciHeap<i32>;
@@ -433,6 +538,8 @@ pub type FibonacciHeapChar = GenericFibonacciHeap<char>;
 mod tests {
     use rand::RngExt;
     use super::*;
+
+    // ── insert / extract_min / peek_min ──────────────────────────────────────
 
     #[test]
     fn test_basic_operations_i32() {
@@ -477,6 +584,87 @@ mod tests {
     }
 
     #[test]
+    fn test_single_element() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(42).unwrap();
+        assert_eq!(heap.len(), 1);
+        assert_eq!(heap.peek_min(), Some(42));
+        assert_eq!(heap.extract_min(), Some(42));
+        assert!(heap.is_empty());
+        assert_eq!(heap.extract_min(), None);
+    }
+
+    #[test]
+    fn test_peek_min_does_not_remove() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(3).unwrap();
+        heap.insert(1).unwrap();
+        heap.insert(2).unwrap();
+
+        assert_eq!(heap.peek_min(), Some(1));
+        assert_eq!(heap.len(), 3); // unchanged
+        assert_eq!(heap.peek_min(), Some(1)); // stable
+    }
+
+    #[test]
+    fn test_peek_min_empty() {
+        let heap = GenericFibonacciHeap::<i32>::new();
+        assert_eq!(heap.peek_min(), None);
+    }
+
+    #[test]
+    fn test_extract_min_sorted_order() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let values = [50, 10, 30, 20, 40];
+        for v in values {
+            heap.insert(v).unwrap();
+        }
+        let mut sorted = values.to_vec();
+        sorted.sort_unstable();
+        for expected in sorted {
+            assert_eq!(heap.extract_min(), Some(expected));
+        }
+    }
+
+    // ── peek_min_node ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_peek_min_node_empty() {
+        let heap = GenericFibonacciHeap::<i32>::new();
+        assert!(heap.peek_min_node().is_none());
+    }
+
+    #[test]
+    fn test_peek_min_node_returns_min() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(99).unwrap();
+        let min_node_handle = heap.insert(1).unwrap();
+        heap.insert(50).unwrap();
+
+        let peeked = heap.peek_min_node().unwrap();
+        // The peeked handle must point to the same allocation as the min we inserted.
+        assert!(Rc::ptr_eq(&peeked, &min_node_handle));
+        assert_eq!(peeked.borrow().key(), &1);
+        assert_eq!(heap.len(), 3); // no element was removed
+    }
+
+    #[test]
+    fn test_peek_min_node_handle_usable_for_decrease_key() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(10).unwrap();
+        heap.insert(5).unwrap();
+
+        let handle = heap.peek_min_node().unwrap();
+        // decrease_key with same value should return InvalidKey (not ≤ check)
+        assert_eq!(heap.decrease_key(&handle, 5), Err(HeapError::InvalidKey));
+        // valid decrease
+        heap.decrease_key(&handle, 1).unwrap();
+        assert_eq!(heap.peek_min(), Some(1));
+    }
+
+    // ── merge ────────────────────────────────────────────────────────────────
+
+    #[test]
     fn test_merge() {
         let mut heap1 = GenericFibonacciHeap::new();
         heap1.insert(10).unwrap();
@@ -492,83 +680,29 @@ mod tests {
     }
 
     #[test]
-    fn test_decrease_key() {
-        let mut heap = GenericFibonacciHeap::new();
-        let node = heap.insert(20).unwrap();
-        heap.insert(10).unwrap();
-
-        assert_eq!(heap.extract_min(), Some(10));
-        heap.decrease_key(&node, 5).unwrap();
-        assert_eq!(heap.extract_min(), Some(5));
-    }
-
-    /// Verifies that decrease_key correctly cuts a node from its parent
-    /// (the path that previously risked a runtime borrow panic).
-    #[test]
-    fn test_decrease_key_with_parent_cut() {
+    fn test_merge_with_empty_heap() {
         let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(7).unwrap();
 
-        // Insert enough nodes so that after an extract_min the remaining nodes
-        // get consolidated: some will have a parent inside a tree.
-        for i in 1..=8 {
-            heap.insert(i * 10).unwrap();
-        }
-        // extract_min triggers consolidate(); afterwards several nodes have parents.
-        assert_eq!(heap.extract_min(), Some(10));
-
-        // Now decrease a key that is deep inside a tree to force a cut + cascading_cut.
-        // We re-insert the nodes we care about to get handles.
-        let mut heap2 = GenericFibonacciHeap::<i32>::new();
-        let nodes: Vec<_> = (1..=8).map(|i| heap2.insert(i * 10).unwrap()).collect();
-        heap2.extract_min(); // consolidate
-
-        // Decrease a high-value node below its parent to force a cut
-        heap2.decrease_key(&nodes[7], 5).unwrap(); // was 80 → now 5
-        assert_eq!(heap2.extract_min(), Some(5));
+        heap.merge(GenericFibonacciHeap::new());
+        assert_eq!(heap.len(), 1);
+        assert_eq!(heap.extract_min(), Some(7));
     }
 
     #[test]
-    fn test_decrease_key_validation() {
-        let mut heap = GenericFibonacciHeap::new();
-        let node = heap.insert(10).unwrap();
+    fn test_merge_into_empty_heap() {
+        let mut heap1 = GenericFibonacciHeap::<i32>::new();
+        let mut heap2 = GenericFibonacciHeap::new();
+        heap2.insert(3).unwrap();
+        heap2.insert(1).unwrap();
 
-        // Invalid key
-        assert_eq!(heap.decrease_key(&node, 15), Err(HeapError::InvalidKey));
-
-        // Valid key
-        assert!(heap.decrease_key(&node, 5).is_ok());
-    }
-
-    #[test]
-    fn test_decrease_key_with_nan() {
-        let mut heap = GenericFibonacciHeap::<f64>::new();
-        let node = heap.insert(10.0).unwrap();
-
-        // NaN should cause comparison error
-        assert_eq!(
-            heap.decrease_key(&node, f64::NAN),
-            Err(HeapError::KeyComparisonError)
-        );
-    }
-
-    #[test]
-    fn test_clear_invalidates_nodes() {
-        let mut heap = GenericFibonacciHeap::<i32>::new();
-        let node = heap.insert(42).unwrap();
-        assert!(heap.validate_node(&node));
-
-        heap.clear();
-
-        // After clear, the node handle must be invalid
-        assert!(!heap.validate_node(&node));
-        assert_eq!(heap.len(), 0);
-        assert!(heap.is_empty());
+        heap1.merge(heap2);
+        assert_eq!(heap1.len(), 2);
+        assert_eq!(heap1.extract_min(), Some(1));
     }
 
     #[test]
     fn test_merge_no_id_collision() {
-        // Both heaps have independently generated node IDs starting from 0.
-        // After merging, validation must work correctly for nodes from both heaps.
         let mut heap_a = GenericFibonacciHeap::<i32>::new();
         let a0 = heap_a.insert(100).unwrap();
         let a1 = heap_a.insert(200).unwrap();
@@ -579,20 +713,228 @@ mod tests {
 
         heap_a.merge(heap_b);
 
-        // All four nodes must still be valid in the merged heap
         assert!(heap_a.validate_node(&a0));
         assert!(heap_a.validate_node(&a1));
         assert!(heap_a.validate_node(&b0));
         assert!(heap_a.validate_node(&b1));
 
         assert_eq!(heap_a.extract_min(), Some(50));
-        // b0 was extracted — now invalid
         assert!(!heap_a.validate_node(&b0));
-        // others still valid
         assert!(heap_a.validate_node(&a0));
         assert!(heap_a.validate_node(&a1));
         assert!(heap_a.validate_node(&b1));
     }
+
+    // ── decrease_key ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_decrease_key() {
+        let mut heap = GenericFibonacciHeap::new();
+        let node = heap.insert(20).unwrap();
+        heap.insert(10).unwrap();
+
+        assert_eq!(heap.extract_min(), Some(10));
+        heap.decrease_key(&node, 5).unwrap();
+        assert_eq!(heap.extract_min(), Some(5));
+    }
+
+    /// Verifies that decrease_key correctly cuts a node from its parent.
+    #[test]
+    fn test_decrease_key_with_parent_cut() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+
+        for i in 1..=8 {
+            heap.insert(i * 10).unwrap();
+        }
+        assert_eq!(heap.extract_min(), Some(10));
+
+        let mut heap2 = GenericFibonacciHeap::<i32>::new();
+        let nodes: Vec<_> = (1..=8).map(|i| heap2.insert(i * 10).unwrap()).collect();
+        heap2.extract_min();
+
+        heap2.decrease_key(&nodes[7], 5).unwrap(); // 80 → 5
+        assert_eq!(heap2.extract_min(), Some(5));
+    }
+
+    #[test]
+    fn test_decrease_key_becomes_new_min() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(1).unwrap();
+        let node = heap.insert(100).unwrap();
+
+        heap.decrease_key(&node, 0).unwrap();
+        assert_eq!(heap.peek_min(), Some(0));
+        assert_eq!(heap.extract_min(), Some(0));
+        assert_eq!(heap.extract_min(), Some(1));
+    }
+
+    /// Trigger multi-level cascading cuts: mark two ancestors, then cut a third.
+    #[test]
+    fn test_decrease_key_cascading_cut() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        // Build a 16-node heap; consolidate creates trees deep enough for cascading.
+        let nodes: Vec<_> = (1..=16).map(|i| heap.insert(i * 10).unwrap()).collect();
+        heap.extract_min(); // consolidate
+
+        // First cut: marks an ancestor
+        heap.decrease_key(&nodes[14], 5).unwrap(); // 150 → 5
+        heap.extract_min(); // remove 5
+
+        // Second cut in the same ancestor: triggers cascading
+        heap.decrease_key(&nodes[13], 4).unwrap(); // 140 → 4
+        assert_eq!(heap.extract_min(), Some(4));
+    }
+
+    #[test]
+    fn test_decrease_key_validation() {
+        let mut heap = GenericFibonacciHeap::new();
+        let node = heap.insert(10).unwrap();
+
+        assert_eq!(heap.decrease_key(&node, 15), Err(HeapError::InvalidKey));
+        assert_eq!(heap.decrease_key(&node, 10), Err(HeapError::InvalidKey));
+        assert!(heap.decrease_key(&node, 5).is_ok());
+    }
+
+    #[test]
+    fn test_decrease_key_with_nan() {
+        let mut heap = GenericFibonacciHeap::<f64>::new();
+        let node = heap.insert(10.0).unwrap();
+
+        assert_eq!(
+            heap.decrease_key(&node, f64::NAN),
+            Err(HeapError::KeyComparisonError)
+        );
+    }
+
+    // ── delete ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_delete_min_node() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let min = heap.insert(1).unwrap();
+        heap.insert(2).unwrap();
+        heap.insert(3).unwrap();
+
+        heap.delete(&min).unwrap();
+        assert_eq!(heap.len(), 2);
+        assert!(!heap.validate_node(&min));
+        assert_eq!(heap.extract_min(), Some(2));
+        assert_eq!(heap.extract_min(), Some(3));
+        assert_eq!(heap.extract_min(), None);
+    }
+
+    #[test]
+    fn test_delete_non_min_root_node() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(1).unwrap();
+        let node = heap.insert(99).unwrap();
+        heap.insert(50).unwrap();
+
+        heap.delete(&node).unwrap();
+        assert_eq!(heap.len(), 2);
+        assert!(!heap.validate_node(&node));
+
+        let mut out = Vec::new();
+        while let Some(v) = heap.extract_min() {
+            out.push(v);
+        }
+        assert_eq!(out, vec![1, 50]);
+    }
+
+    /// Delete a node that sits deep inside a consolidated tree (has a parent).
+    #[test]
+    fn test_delete_deep_node() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let nodes: Vec<_> = (1..=8).map(|i| heap.insert(i * 10).unwrap()).collect();
+        heap.extract_min(); // consolidate: nodes[1..] now have parents
+
+        // nodes[6] = key 70 — should be somewhere inside the tree
+        heap.delete(&nodes[6]).unwrap();
+        assert!(!heap.validate_node(&nodes[6]));
+
+        // The remaining 6 keys are 20,30,40,50,60,80; extract all and verify sorted.
+        let mut out = Vec::new();
+        while let Some(v) = heap.extract_min() {
+            out.push(v);
+        }
+        assert_eq!(out, vec![20, 30, 40, 50, 60, 80]);
+    }
+
+    #[test]
+    fn test_delete_only_element() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(42).unwrap();
+
+        heap.delete(&node).unwrap();
+        assert!(heap.is_empty());
+        assert_eq!(heap.extract_min(), None);
+    }
+
+    #[test]
+    fn test_delete_invalid_node_returns_error() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(10).unwrap();
+        heap.extract_min(); // node is now invalid
+
+        assert_eq!(heap.delete(&node), Err(HeapError::NodeNotFound));
+    }
+
+    #[test]
+    fn test_delete_all_nodes_sequentially() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let nodes: Vec<_> = (1..=5).map(|i| heap.insert(i).unwrap()).collect();
+
+        for node in &nodes {
+            heap.delete(node).unwrap();
+        }
+        assert!(heap.is_empty());
+        assert_eq!(heap.extract_min(), None);
+    }
+
+    #[test]
+    fn test_delete_then_insert_and_extract() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let nodes: Vec<_> = (1..=4).map(|i| heap.insert(i * 10).unwrap()).collect();
+        heap.extract_min(); // consolidate
+
+        heap.delete(&nodes[2]).unwrap(); // delete key=30
+        heap.insert(5).unwrap();
+
+        let mut out = Vec::new();
+        while let Some(v) = heap.extract_min() {
+            out.push(v);
+        }
+        assert_eq!(out, vec![5, 20, 40]);
+    }
+
+    // ── clear ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_clear_invalidates_nodes() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(42).unwrap();
+        assert!(heap.validate_node(&node));
+
+        heap.clear();
+
+        assert!(!heap.validate_node(&node));
+        assert_eq!(heap.len(), 0);
+        assert!(heap.is_empty());
+    }
+
+    #[test]
+    fn test_clear_then_reuse() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(1).unwrap();
+        heap.insert(2).unwrap();
+        heap.clear();
+
+        heap.insert(99).unwrap();
+        assert_eq!(heap.len(), 1);
+        assert_eq!(heap.extract_min(), Some(99));
+    }
+
+    // ── node validity ────────────────────────────────────────────────────────
 
     #[test]
     fn test_extracted_node_is_invalid() {
@@ -601,10 +943,9 @@ mod tests {
         heap.insert(2).unwrap();
 
         assert!(heap.validate_node(&node));
-        heap.extract_min(); // removes key=1
+        heap.extract_min();
         assert!(!heap.validate_node(&node));
 
-        // decrease_key on an extracted node must return NodeNotFound
         assert_eq!(heap.decrease_key(&node, 0), Err(HeapError::NodeNotFound));
     }
 
@@ -614,6 +955,141 @@ mod tests {
         let node = heap.insert(42).unwrap();
         assert_eq!(*node.borrow().key(), 42);
     }
+
+    #[test]
+    fn test_node_ref_trait() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let node = heap.insert(7).unwrap();
+
+        assert_eq!(node.get_key(), 7);
+        assert!(node.validate(&heap));
+
+        let id_before = node.get_id();
+        // id is stable — pointer must not change between calls
+        assert_eq!(node.get_id(), id_before);
+    }
+
+    // ── into_sorted_vec ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_into_sorted_vec_basic() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        for v in [3, 1, 4, 1, 5, 9, 2, 6] {
+            heap.insert(v).unwrap();
+        }
+        let sorted = heap.into_sorted_vec();
+        let mut expected = vec![3, 1, 4, 1, 5, 9, 2, 6];
+        expected.sort_unstable();
+        assert_eq!(sorted, expected);
+    }
+
+    #[test]
+    fn test_into_sorted_vec_empty() {
+        let heap = GenericFibonacciHeap::<i32>::new();
+        assert_eq!(heap.into_sorted_vec(), Vec::<i32>::new());
+    }
+
+    #[test]
+    fn test_into_sorted_vec_single() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(42).unwrap();
+        assert_eq!(heap.into_sorted_vec(), vec![42]);
+    }
+
+    // ── IntoIterator ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_into_iter_sorted_order() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        for v in [5, 2, 8, 1, 9, 3] {
+            heap.insert(v).unwrap();
+        }
+        let result: Vec<_> = heap.into_iter().collect();
+        assert_eq!(result, vec![1, 2, 3, 5, 8, 9]);
+    }
+
+    #[test]
+    fn test_into_iter_size_hint() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(10).unwrap();
+        heap.insert(20).unwrap();
+        heap.insert(30).unwrap();
+
+        let mut iter = heap.into_iter();
+        assert_eq!(iter.size_hint(), (3, Some(3)));
+        iter.next();
+        assert_eq!(iter.size_hint(), (2, Some(2)));
+    }
+
+    #[test]
+    fn test_into_iter_empty_heap() {
+        let heap = GenericFibonacciHeap::<i32>::new();
+        let result: Vec<_> = heap.into_iter().collect();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_exact_size_iterator() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(1).unwrap();
+        heap.insert(2).unwrap();
+
+        let iter = heap.into_iter();
+        assert_eq!(iter.len(), 2);
+    }
+
+    // ── FromIterator ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_from_iter() {
+        let heap: GenericFibonacciHeap<i32> = [4, 2, 7, 1, 5].into_iter().collect();
+        assert_eq!(heap.len(), 5);
+        assert_eq!(heap.peek_min(), Some(1));
+    }
+
+    #[test]
+    fn test_from_iter_empty() {
+        let heap: GenericFibonacciHeap<i32> = std::iter::empty().collect();
+        assert!(heap.is_empty());
+    }
+
+    #[test]
+    fn test_from_iter_sorted_output() {
+        let data = vec![9i32, 3, 6, 1, 8, 2, 7, 4, 5];
+        let heap: GenericFibonacciHeap<i32> = data.iter().copied().collect();
+        let sorted: Vec<_> = heap.into_iter().collect();
+        assert_eq!(sorted, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    // ── Extend ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_extend() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(10).unwrap();
+        heap.extend([3, 7, 1, 9]);
+
+        assert_eq!(heap.len(), 5);
+        assert_eq!(heap.extract_min(), Some(1));
+    }
+
+    #[test]
+    fn test_extend_empty_iter() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(5).unwrap();
+        heap.extend(std::iter::empty::<i32>());
+        assert_eq!(heap.len(), 1);
+    }
+
+    #[test]
+    fn test_extend_then_drain() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.extend(0..10);
+        let sorted: Vec<_> = heap.into_iter().collect();
+        assert_eq!(sorted, (0..10).collect::<Vec<_>>());
+    }
+
+    // ── type aliases ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_type_aliases() {
@@ -632,7 +1108,6 @@ mod tests {
 
     #[test]
     fn test_backward_compatibility() {
-        // Test that the original FibonacciHeap type alias works
         let mut heap: FibonacciHeap = FibonacciHeap::new();
         heap.insert(100).unwrap();
         heap.insert(50).unwrap();
@@ -641,18 +1116,19 @@ mod tests {
         assert_eq!(heap.extract_min(), Some(100));
     }
 
+    // ── edge cases ───────────────────────────────────────────────────────────
+
     #[test]
     fn test_triple_zero_four_pops() {
         let mut heap = GenericFibonacciHeap::<i32>::new();
         heap.insert(0).unwrap();
         heap.insert(0).unwrap();
         heap.insert(0).unwrap();
-        assert_eq!(heap.extract_min(), Some(0)); // 1st
-        assert_eq!(heap.extract_min(), Some(0)); // 2nd
-        assert_eq!(heap.extract_min(), Some(0)); // 3rd
-        assert_eq!(heap.extract_min(), None); // 4th — heap is empty
+        assert_eq!(heap.extract_min(), Some(0));
+        assert_eq!(heap.extract_min(), Some(0));
+        assert_eq!(heap.extract_min(), Some(0));
+        assert_eq!(heap.extract_min(), None);
 
-        // Same but exhaust varying counts of equal-key nodes
         for n in 1..=16 {
             let mut h = GenericFibonacciHeap::<i32>::new();
             for _ in 0..n {
@@ -665,6 +1141,36 @@ mod tests {
             assert_eq!(h.len(), 0, "len after draining {} zeros", n);
         }
     }
+
+    #[test]
+    fn test_negative_keys() {
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        heap.insert(-5).unwrap();
+        heap.insert(-1).unwrap();
+        heap.insert(-10).unwrap();
+        assert_eq!(heap.extract_min(), Some(-10));
+        assert_eq!(heap.extract_min(), Some(-5));
+        assert_eq!(heap.extract_min(), Some(-1));
+    }
+
+    #[test]
+    fn test_default_trait() {
+        let heap: GenericFibonacciHeap<i32> = Default::default();
+        assert!(heap.is_empty());
+    }
+
+    /// Heap-sort correctness: i32 values including duplicates.
+    #[test]
+    fn test_heap_sort_with_duplicates() {
+        let mut input = vec![3i32, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5];
+        let heap: GenericFibonacciHeap<i32> = input.iter().copied().collect();
+        let sorted: Vec<_> = heap.into_iter().collect();
+
+        input.sort_unstable();
+        assert_eq!(sorted, input);
+    }
+
+    // ── stress tests ─────────────────────────────────────────────────────────
 
     #[test]
     fn test_consolidate_no_panic_stress() {
@@ -692,5 +1198,49 @@ mod tests {
 
             assert!(heap.len() <= n + 1000);
         }
+    }
+
+    /// Mix of insert / decrease_key / delete under random workload.
+    #[test]
+    fn test_mixed_operations_stress() {
+        let mut rng = rand::rng();
+        let n = 1_000usize;
+
+        let mut heap = GenericFibonacciHeap::<i32>::new();
+        let mut nodes: Vec<Rc<RefCell<Node<i32>>>> = Vec::with_capacity(n);
+        let mut live_count = 0usize;
+
+        for _ in 0..n {
+            let v = rng.random_range(0..10_000);
+            nodes.push(heap.insert(v).unwrap());
+            live_count += 1;
+        }
+
+        for _ in 0..(n / 2) {
+            let idx = rng.random_range(0..nodes.len());
+            if !heap.validate_node(&nodes[idx]) {
+                continue;
+            }
+            let cur = nodes[idx].borrow().key().clone();
+            let delta = rng.random_range(1..=cur.max(1));
+            let _ = heap.decrease_key(&nodes[idx], cur - delta);
+        }
+
+        for _ in 0..(n / 4) {
+            let idx = rng.random_range(0..nodes.len());
+            if heap.validate_node(&nodes[idx]) {
+                heap.delete(&nodes[idx]).unwrap();
+                live_count -= 1;
+            }
+        }
+
+        assert_eq!(heap.len(), live_count);
+
+        // Extract remaining elements and verify they are in sorted order.
+        let extracted: Vec<_> = heap.into_iter().collect();
+        for w in extracted.windows(2) {
+            assert!(w[0] <= w[1], "not sorted: {} > {}", w[0], w[1]);
+        }
+        assert_eq!(extracted.len(), live_count);
     }
 }
