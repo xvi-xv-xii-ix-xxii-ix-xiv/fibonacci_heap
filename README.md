@@ -11,23 +11,35 @@ A high-performance **Fibonacci Heap** implementation in Rust with **generic type
 
 ### Time Complexities
 
-| Operation    | Amortized complexity |
-| ------------ | -------------------- |
-| Insert       | O(1)                 |
-| Peek Min     | O(1)                 |
-| Merge        | O(1)                 |
-| Decrease Key | O(1)                 |
-| Extract Min  | O(log n)             |
+| Operation        | Amortized complexity |
+| ---------------- | -------------------- |
+| Insert           | O(1)                 |
+| Peek Min         | O(1)                 |
+| Peek Min Node    | O(1)                 |
+| Merge            | O(1)                 |
+| Decrease Key     | O(1)                 |
+| Extract Min      | O(log n)             |
+| Delete           | O(log n)             |
+| Into Sorted Vec  | O(n log n)           |
 
 ### Supported Operations
 
 - **Insert** — add a new element; returns an `Rc<RefCell<Node<T>>>` handle for later updates.
 - **Extract Min** — remove and return the smallest element.
 - **Decrease Key** — reduce the key of a node referenced by a previously obtained handle.
+- **Delete** — remove an arbitrary node by handle in O(log n) amortized.
 - **Merge** — merge two heaps in O(1) without ID conflicts.
-- **Peek Min** — read the minimum without removing it.
+- **Peek Min** — read the minimum key without removing it.
+- **Peek Min Node** — return an `Rc` handle to the minimum node for use with `decrease_key` / `delete`.
+- **Into Sorted Vec** — consume the heap and return all keys in ascending order.
 - **Validate Node** — O(1) check whether a handle still refers to a node in the heap.
 - **Clear** — remove all elements; all previously issued handles are invalidated.
+
+### Standard Rust Traits
+
+- **`IntoIterator`** — consuming iterator yielding keys in ascending order with exact `size_hint`.
+- **`FromIterator<T>`** — build a heap directly from any iterator: `iter.collect::<GenericFibonacciHeap<_>>()`.
+- **`Extend<T>`** — bulk-insert from an iterator: `heap.extend(values)`.
 
 ### Supported Types
 
@@ -179,6 +191,46 @@ fn main() -> Result<(), HeapError> {
 
     Ok(())
 }
+```
+
+### Deleting an Arbitrary Node
+
+```rust
+use fibonacci_heap::GenericFibonacciHeap;
+
+let mut heap = GenericFibonacciHeap::<i32>::new();
+heap.insert(1).unwrap();
+let mid = heap.insert(50).unwrap();
+heap.insert(100).unwrap();
+
+// Remove 50 without knowing its position in the tree
+heap.delete(&mid).unwrap();
+assert_eq!(heap.len(), 2);
+
+// The handle is now invalid
+assert!(!heap.validate_node(&mid));
+
+assert_eq!(heap.extract_min(), Some(1));
+assert_eq!(heap.extract_min(), Some(100));
+```
+
+### Iterator, FromIterator, Extend
+
+```rust
+use fibonacci_heap::GenericFibonacciHeap;
+
+// Build from an iterator
+let heap: GenericFibonacciHeap<i32> = vec![5, 3, 8, 1].into_iter().collect();
+
+// Consume as a sorted iterator
+let sorted: Vec<i32> = heap.into_iter().collect();
+assert_eq!(sorted, vec![1, 3, 5, 8]);
+
+// Extend an existing heap
+let mut heap2 = GenericFibonacciHeap::<i32>::new();
+heap2.insert(10).unwrap();
+heap2.extend([2, 7, 4]);
+assert_eq!(heap2.into_sorted_vec(), vec![2, 4, 7, 10]);
 ```
 
 ### Node Validity and `clear()`
